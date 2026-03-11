@@ -1,0 +1,127 @@
+version: '3.9'
+
+services:
+  # ---- Backend API ----
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cashflowai-backend
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - '8000:8000'
+    depends_on:
+      - redis
+    networks:
+      - cashflowai
+    volumes:
+      - ./backend:/app
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:8000/health']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---- Frontend ----
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: cashflowai-frontend
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - '3000:3000'
+    depends_on:
+      - backend
+    networks:
+      - cashflowai
+
+  # ---- Redis ----
+  redis:
+    image: redis:7-alpine
+    container_name: cashflowai-redis
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    networks:
+      - cashflowai
+    command: redis-server --appendonly yes
+
+  # ---- n8n Worker ----
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: cashflowai-n8n
+    restart: unless-stopped
+    ports:
+      - '5678:5678'
+    env_file: .env
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=admin
+      - N8N_BASIC_AUTH_PASSWORD=cashflowai_n8n_pass
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://n8n:5678/
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./workers/n8n:/home/node/.n8n/custom
+    networks:
+      - cashflowai
+
+  # ---- Celery Worker ----
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cashflowai-celery
+    restart: unless-stopped
+    env_file: .env
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=4
+    depends_on:
+      - redis
+    networks:
+      - cashflowai
+
+  # ---- Celery Beat (Scheduler) ----
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cashflowai-celery-beat
+    restart: unless-stopped
+    env_file: .env
+    command: celery -A app.workers.celery_app beat --loglevel=info
+    depends_on:
+      - redis
+    networks:
+      - cashflowai
+
+  # ---- Nginx Reverse Proxy ----
+  nginx:
+    image: nginx:alpine
+    container_name: cashflowai-nginx
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infra/nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - cashflowai
+
+volumes:
+  redis_data:
+  n8n_data:
+
+networks:
+  cashflowai:
+    driver: bridge
